@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/openshift/osdctl/cmd/promote/dynatrace"
-	"github.com/openshift/osdctl/cmd/promote/iexec"
+	"github.com/openshift/osdctl/cmd/promote/dynatrace/iexec"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"

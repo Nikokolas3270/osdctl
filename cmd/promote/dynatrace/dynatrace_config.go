@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/openshift/osdctl/cmd/promote/iexec"
+	"github.com/openshift/osdctl/cmd/promote/dynatrace/iexec"
 )
 
 type DynatraceConfig struct {

@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/openshift/osdctl/cmd/promote/iexec"
+	"github.com/openshift/osdctl/cmd/promote/dynatrace/iexec"
 	"gopkg.in/yaml.v3"
 )
 

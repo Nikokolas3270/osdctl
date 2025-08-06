@@ -4,7 +4,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/openshift/osdctl/cmd/promote/iexec"
+	"github.com/openshift/osdctl/cmd/promote/dynatrace/iexec"
 )
 
 var (

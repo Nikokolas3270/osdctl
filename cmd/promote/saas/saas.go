@@ -2,6 +2,7 @@ package saas
 
 import (
 	"fmt"
+
 	"github.com/openshift/osdctl/cmd/promote/git"
 	"github.com/openshift/osdctl/cmd/promote/iexec"
 	"github.com/spf13/cobra"
@@ -9,8 +10,6 @@ import (
 
 type saasOptions struct {
 	list bool
-	osd  bool
-	hcp  bool
 
 	appInterfaceCheckoutDir string
 	serviceName             string
@@ -36,23 +35,17 @@ func NewCmdSaas() *cobra.Command {
 		osdctl promote saas --serviceName <service-name> --gitHash <git-hash> --hcp`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ops.validateSaasFlow()
-			appInterface := git.BootstrapOsdCtlForAppInterfaceAndServicePromotions(ops.appInterfaceCheckoutDir, iexec.Exec{})
+			appInterfaceClone := git.BootstrapOsdCtlForAppInterfaceAndServicePromotions(ops.appInterfaceCheckoutDir, iexec.Exec{})
 			if ops.list {
-				if ops.serviceName != "" || ops.gitHash != "" || ops.osd || ops.hcp {
+				if ops.serviceName != "" || ops.gitHash != "" {
 					fmt.Printf("Error: --list cannot be used with any other flags\n\n")
 
 					return cmd.Help()
 				}
-				return listServiceNames(appInterface)
+				return listServiceNames(appInterfaceClone)
 			}
 
-			if !(ops.osd || ops.hcp) && ops.serviceName != "" {
-				fmt.Printf("Error: --serviceName cannot be used without either --osd or --hcp\n\n")
-
-				return cmd.Help()
-			}
-
-			err := servicePromotion(appInterface, ops.serviceName, ops.gitHash, ops.namespaceRef, ops.osd, ops.hcp)
+			err := servicePromotion(appInterfaceClone, ops.serviceName, ops.gitHash, ops.namespaceRef)
 			if err != nil {
 				fmt.Printf("Error while promoting service: %v\n", err)
 			}
@@ -65,8 +58,6 @@ func NewCmdSaas() *cobra.Command {
 	saasCmd.Flags().StringVarP(&ops.serviceName, "serviceName", "", "", "SaaS service/operator getting promoted")
 	saasCmd.Flags().StringVarP(&ops.gitHash, "gitHash", "g", "", "Git hash of the SaaS service/operator commit getting promoted")
 	saasCmd.Flags().StringVarP(&ops.namespaceRef, "namespaceRef", "n", "", "SaaS target namespace reference name")
-	saasCmd.Flags().BoolVarP(&ops.osd, "osd", "", false, "OSD service/operator getting promoted")
-	saasCmd.Flags().BoolVarP(&ops.hcp, "hcp", "", false, "HCP service/operator getting promoted")
 	saasCmd.Flags().StringVarP(&ops.appInterfaceCheckoutDir, "appInterfaceDir", "", "", "location of app-interface checkout. Falls back to current working directory")
 
 	return saasCmd

@@ -2,9 +2,10 @@ package saas
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/openshift/osdctl/cmd/promote/git"
@@ -12,60 +13,60 @@ import (
 )
 
 const (
-	OSDSaasDir = "data/services/osd-operators/cicd/saas"
-	BPSaasDir  = "data/services/backplane/cicd/saas"
-	CADSaasDir = "data/services/configuration-anomaly-detection/cicd"
+	OSDSaasDirPath = "data/services/osd-operators/cicd/saas"
+	BPSaasDirPath  = "data/services/backplane/cicd/saas"
+	CADSaasDirPath = "data/services/configuration-anomaly-detection/cicd"
 )
 
-var (
-	ServicesSlice    []string
-	ServicesFilesMap = map[string]string{}
-)
-
-func listServiceNames(appInterface git.AppInterface) error {
-	_, err := GetServiceNames(appInterface, OSDSaasDir, BPSaasDir, CADSaasDir)
+func listServiceNames(appInterfaceClone git.AppInterface) error {
+	servicesRegistry, err := GetServicesRegistry(appInterfaceClone)
 	if err != nil {
 		return err
 	}
 
-	sort.Strings(ServicesSlice)
 	fmt.Println("### Available service names ###")
-	for _, service := range ServicesSlice {
-		fmt.Println(service)
+	for _, serviceName := range servicesRegistry.GetServiceNames() {
+		fmt.Println(serviceName)
 	}
 
 	return nil
 }
 
-func servicePromotion(appInterface git.AppInterface, serviceName, gitHash string, namespaceRef string, osd, hcp bool) error {
-	_, err := GetServiceNames(appInterface, OSDSaasDir, BPSaasDir, CADSaasDir)
+func servicePromotion(appInterfaceClone git.AppInterface, serviceName, gitHash string, namespaceRef string) error {
+	servicesRegistry, err := GetServicesRegistry(appInterfaceClone)
 	if err != nil {
 		return err
 	}
 
-	serviceName, err = ValidateServiceName(ServicesSlice, serviceName)
+	serviceName, err = servicesRegistry.ValidateServiceName(serviceName)
 	if err != nil {
 		return err
 	}
 
-	saasDir, err := GetSaasDir(serviceName, osd, hcp)
+	saasFilePath, err := servicesRegistry.GetSaasFilePath(serviceName)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("SAAS Directory: %v\n", saasDir)
+	fmt.Printf("SAAS file: %v\n", saasFilePath)
 
-	serviceData, err := os.ReadFile(saasDir)
+	serviceObj, err := git.CreateServiceObjFromSaasFile(saasFilePath)
 	if err != nil {
-		return fmt.Errorf("failed to read SAAS file: %v", err)
+		return err
 	}
 
-	currentGitHash, serviceRepo, err := git.GetCurrentGitHashFromAppInterface(serviceData, serviceName, namespaceRef)
+	currentGitHash, err := serviceObj.GetCurrentGitHash(namespaceRef)
 	if err != nil {
-		return fmt.Errorf("failed to get current git hash or service repo: %v", err)
+		return err
 	}
-	fmt.Printf("Current Git Hash: %v\nGit Repo: %v\n\n", currentGitHash, serviceRepo)
 
-	promotionGitHash, commitLog, err := git.CheckoutAndCompareGitHash(appInterface.GitExecutor, serviceRepo, gitHash, currentGitHash)
+	serviceRepo, err := serviceObj.GetRepoURL()
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("Current git hash: %v\nGit repo: %v\n\n", currentGitHash, serviceRepo)
+
+	promotionGitHash, commitLog, err := git.CheckoutAndCompareGitHash(appInterfaceClone.GitExecutor, serviceRepo, gitHash, currentGitHash)
 	if err != nil {
 		return fmt.Errorf("failed to checkout and compare git hash: %v", err)
 	} else if promotionGitHash == "" {
@@ -75,18 +76,28 @@ func servicePromotion(appInterface git.AppInterface, serviceName, gitHash string
 	fmt.Printf("Service: %s will be promoted to %s\n", serviceName, promotionGitHash)
 
 	branchName := fmt.Sprintf("promote-%s-%s", serviceName, promotionGitHash)
-	err = appInterface.UpdateAppInterface(serviceName, saasDir, currentGitHash, promotionGitHash, branchName)
+	err = appInterfaceClone.UpdateAppInterface(branchName)
 	if err != nil {
 		fmt.Printf("FAILURE: %v\n", err)
 	}
+
+	err = serviceObj.SetGitHash(namespaceRef, promotionGitHash)
+	if err != nil {
+		fmt.Printf("FAILURE: %v\n", err)
+	}
+	err = serviceObj.Save()
+	if err != nil {
+		fmt.Printf("FAILURE: %v\n", err)
+	}
+
 	prefix := "saas-"
 	operatorName := strings.TrimPrefix(serviceName, prefix)
 	commitMessage := fmt.Sprintf("Promote %s to %s\n\nMonitor rollout status here https://inscope.corp.redhat.com/catalog/default/component/%s/rollout\n\n", serviceName, promotionGitHash, operatorName)
 	commitMessage += fmt.Sprintf("See %s/compare/%s...%s for contents of the promotion. clog:\n\n%s", serviceRepo, currentGitHash, promotionGitHash, commitLog)
 
 	// ovverriding appInterface.GitExecuter to iexec.Exec{}
-	appInterface.GitExecutor = iexec.Exec{}
-	err = appInterface.CommitSaasFile(saasDir, commitMessage)
+	appInterfaceClone.GitExecutor = iexec.Exec{}
+	err = appInterfaceClone.CommitSaasFile(saasFilePath, commitMessage)
 	if err != nil {
 		return fmt.Errorf("failed to commit changes to app-interface: %w", err)
 	}
@@ -101,56 +112,67 @@ func servicePromotion(appInterface git.AppInterface, serviceName, gitHash string
 	return nil
 }
 
-func GetServiceNames(appInterface git.AppInterface, saaDirs ...string) ([]string, error) {
-	baseDir := appInterface.GitDirectory
+type ServicesRegistry struct {
+	serviceNameToSaasFilePath map[string]string
+}
 
-	for _, dir := range saaDirs {
-		dirGlob := filepath.Join(baseDir, dir, "saas-*")
-		filepaths, err := filepath.Glob(dirGlob)
+func GetServicesRegistry(appInterfaceClone git.AppInterface) (*ServicesRegistry, error) {
+	baseDirPath := appInterfaceClone.GitDirectory
+	saasRelDirPaths := []string{OSDSaasDirPath, BPSaasDirPath, CADSaasDirPath}
+	serviceNameToFilePath := make(map[string]string)
+	isFile := func(fileName string) bool {
+		if fileInfo, err := os.Stat(fileName); err == nil {
+			return fileInfo.Mode().IsRegular()
+		}
+		return false
+	}
+
+	for _, saasRelDirPath := range saasRelDirPaths {
+		saasDirPath := filepath.Join(baseDirPath, saasRelDirPath)
+		saasPaths, err := filepath.Glob(filepath.Join(saasDirPath, "saas-*"))
 		if err != nil {
 			return nil, err
 		}
-		for _, filepath := range filepaths {
-			filename := strings.TrimPrefix(filepath, baseDir+"/"+dir+"/")
-			filename = strings.TrimSuffix(filename, ".yaml")
-			ServicesSlice = append(ServicesSlice, filename)
-			ServicesFilesMap[filename] = filepath
+		for _, saasPath := range saasPaths {
+			serviceName := strings.TrimSuffix(filepath.Base(saasPath), filepath.Ext(saasPath))
+
+			if strings.HasSuffix(saasPath, ".yaml") && isFile(saasPath) {
+				serviceNameToFilePath[serviceName] = saasPath
+			} else {
+				for _, fileName := range []string{"deploy.yaml", "hypershift-deploy.yaml"} {
+					filePath := filepath.Join(saasPath, fileName)
+					if isFile(filePath) {
+						serviceNameToFilePath[serviceName] = filePath
+						break
+					}
+				}
+			}
 		}
 	}
 
-	return ServicesSlice, nil
+	return &ServicesRegistry{serviceNameToFilePath}, nil
 }
 
-func ValidateServiceName(serviceSlice []string, serviceName string) (string, error) {
+func (r *ServicesRegistry) GetServiceNames() []string {
+	return slices.Sorted(maps.Keys(r.serviceNameToSaasFilePath))
+}
+
+func (r *ServicesRegistry) ValidateServiceName(serviceName string) (string, error) {
 	fmt.Printf("### Checking if service %s exists ###\n", serviceName)
-	for _, service := range serviceSlice {
-		if service == serviceName {
-			fmt.Printf("Service %s found\n", serviceName)
-			return serviceName, nil
-		}
-		if service == "saas-"+serviceName {
-			fmt.Printf("Service %s found\n", serviceName)
-			return "saas-" + serviceName, nil
+
+	for _, candidateServiceName := range []string{serviceName, "saas-" + serviceName} {
+		if _, ok := r.serviceNameToSaasFilePath[candidateServiceName]; ok {
+			fmt.Printf("Service %s found\n", candidateServiceName)
+			return candidateServiceName, nil
 		}
 	}
 
 	return serviceName, fmt.Errorf("service %s not found", serviceName)
 }
 
-func GetSaasDir(serviceName string, osd bool, hcp bool) (string, error) {
-	if saasDir, ok := ServicesFilesMap[serviceName]; ok {
-		if strings.Contains(saasDir, ".yaml") && osd {
-			return saasDir, nil
-		}
-
-		// This is a hack while we migrate the rest of the operators unto Progressive Delivery
-		if osd {
-			saasDir = saasDir + "/deploy.yaml"
-			return saasDir, nil
-		} else if hcp {
-			saasDir = saasDir + "/hypershift-deploy.yaml"
-			return saasDir, nil
-		}
+func (r *ServicesRegistry) GetSaasFilePath(serviceName string) (string, error) {
+	if saasFilePath, ok := r.serviceNameToSaasFilePath[serviceName]; ok {
+		return saasFilePath, nil
 	}
 
 	return "", fmt.Errorf("saas directory for service %s not found", serviceName)

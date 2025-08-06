@@ -1,18 +1,16 @@
 package git
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
-	"regexp"
-	"strconv"
 	"strings"
 
 	"github.com/openshift/osdctl/cmd/promote/iexec"
-	kyaml "sigs.k8s.io/kustomize/kyaml/yaml"
 
-	"gopkg.in/yaml.v3"
+	"github.com/goccy/go-yaml"
 )
 
 const (
@@ -39,38 +37,14 @@ type AppInterface struct {
 	GitExecutor  iexec.IExec
 }
 
-// replaceTargetSha replaces sha for targets in file whose name matches a given substring
-// returns updated yaml, error, and false if no targets were found.
-func replaceTargetSha(fileContent string, targetSuffix string, promotionGitHash string) (string, error, bool) {
-	node, err := kyaml.Parse(fileContent)
-	if err != nil {
-		return "", fmt.Errorf("error parsing saas YAML: %v", err), false
-	}
-	targetFound := false
-	rts, err := kyaml.Lookup("resourceTemplates").Filter(node)
-	if err != nil {
-		return "", fmt.Errorf("error querying resource templates: %v", err), false
-	}
-	for i := range len(rts.Content()) {
-		targets, err := kyaml.Lookup("resourceTemplates", strconv.Itoa(i), "targets").Filter(node)
-		if err != nil {
-			return "", fmt.Errorf("error querying saas YAML: %v", err), false
-		}
-		err = targets.VisitElements(func(element *kyaml.RNode) error {
-			name, _ := element.GetString("name")
-			match, _ := regexp.MatchString("(.*)"+targetSuffix, name)
-			if match {
-				targetFound = true
-				fmt.Println("updating target: ", name)
-				_, err = element.Pipe(kyaml.SetField("ref", kyaml.NewStringRNode(promotionGitHash)))
-				if err != nil {
-					return fmt.Errorf("error setting ref: %v", err)
-				}
-			}
-			return nil
-		})
-	}
-	return node.MustString(), err, targetFound
+type node yaml.Node
+
+type ServiceObj struct {
+	saasFilePath   string
+	documentNode   *yaml.Node
+	rootNode       *node
+	name           string
+	allTargetNodes []*node
 }
 
 func DefaultAppInterfaceDirectory() string {
@@ -126,128 +100,7 @@ func (a *AppInterface) checkAppInterfaceCheckout() error {
 	return nil
 }
 
-func GetCurrentGitHashFromAppInterface(saarYamlFile []byte, serviceName string, namespaceRef string) (string, string, error) {
-	var currentGitHash string
-	var serviceRepo string
-	var service Service
-	err := yaml.Unmarshal(saarYamlFile, &service)
-	if err != nil {
-		log.Fatal(fmt.Errorf("cannot unmarshal yaml data of service %s: %v", serviceName, err))
-	}
-
-	if namespaceRef != "" {
-		for _, resourceTemplate := range service.ResourceTemplates {
-			for _, target := range resourceTemplate.Targets {
-				if strings.Contains(target.Namespace["$ref"], namespaceRef) {
-					currentGitHash = target.Ref
-					break
-				}
-			}
-		}
-	} else if service.Name == "saas-configuration-anomaly-detection-db" {
-		for _, resourceTemplate := range service.ResourceTemplates {
-			for _, target := range resourceTemplate.Targets {
-				if strings.Contains(target.Namespace["$ref"], "app-sre-observability-production-int.yml") {
-					currentGitHash = target.Ref
-					break
-				}
-			}
-		}
-	} else if strings.Contains(service.Name, "configuration-anomaly-detection") {
-		for _, resourceTemplate := range service.ResourceTemplates {
-			for _, target := range resourceTemplate.Targets {
-				if strings.Contains(target.Namespace["$ref"], "configuration-anomaly-detection-production") {
-					currentGitHash = target.Ref
-					break
-				}
-			}
-		}
-	} else if strings.Contains(service.Name, "rhobs-rules-and-dashboards") {
-		for _, resourceTemplate := range service.ResourceTemplates {
-			for _, target := range resourceTemplate.Targets {
-				if strings.Contains(target.Namespace["$ref"], "production") {
-					currentGitHash = target.Ref
-					break
-				}
-			}
-		}
-	} else if strings.Contains(service.Name, "saas-backplane-api") {
-		for _, resourceTemplate := range service.ResourceTemplates {
-			for _, target := range resourceTemplate.Targets {
-				if strings.Contains(target.Namespace["$ref"], "backplanep") {
-					currentGitHash = target.Ref
-					break
-				}
-			}
-		}
-	} else {
-		for _, resourceTemplate := range service.ResourceTemplates {
-			if !strings.Contains(resourceTemplate.Name, "package") {
-				for _, target := range resourceTemplate.Targets {
-					if strings.Contains(target.Name, canaryStr) {
-						currentGitHash = target.Ref // get canary target ref
-						break
-					}
-				}
-				if currentGitHash == "" { // canary targets not found
-					for _, target := range resourceTemplate.Targets {
-						if strings.Contains(target.Namespace["$ref"], prodHiveStr) {
-							currentGitHash = target.Ref
-							break
-						}
-					}
-				}
-			}
-		}
-	}
-
-	if currentGitHash == "" {
-		return "", "", fmt.Errorf("production namespace not found for service %s", serviceName)
-	}
-
-	if len(service.ResourceTemplates) > 0 {
-		serviceRepo = service.ResourceTemplates[0].URL
-	}
-
-	if serviceRepo == "" {
-		return "", "", fmt.Errorf("service repo not found for service %s", serviceName)
-	}
-
-	return currentGitHash, serviceRepo, nil
-}
-
-func GetCurrentPackageTagFromAppInterface(saasFile string) (string, error) {
-	saasData, err := os.ReadFile(saasFile)
-	if err != nil {
-		return "", fmt.Errorf("failed to read file '%s': %w", saasFile, err)
-	}
-
-	service := Service{}
-	err = yaml.Unmarshal(saasData, &service)
-	if err != nil {
-		return "", fmt.Errorf("failed to unmarshal service definition: %w", err)
-	}
-
-	var currentPackageTag string
-	if strings.Contains(service.Name, "configuration-anomaly-detection") {
-		return "", fmt.Errorf("cannot promote package for configuration-anomaly-detection")
-	}
-	if strings.Contains(service.Name, "rhobs-rules-and-dashboards") {
-		return "", fmt.Errorf("cannot promote package for rhobs-rules-and-dashboards")
-	}
-	for _, resourceTemplate := range service.ResourceTemplates {
-		if strings.Contains(resourceTemplate.Name, "package") {
-			for _, target := range resourceTemplate.Targets {
-				if strings.Contains(target.Namespace["$ref"], prodHiveStr) {
-					currentPackageTag = target.Parameters["PACKAGE_TAG"].(string)
-				}
-			}
-		}
-	}
-	return currentPackageTag, nil
-}
-
-func (a *AppInterface) UpdateAppInterface(_, saasFile, currentGitHash, promotionGitHash, branchName string) error {
+func (a *AppInterface) UpdateAppInterface(branchName string) error {
 
 	if err := a.GitExecutor.Run(a.GitDirectory, "git", "checkout", "master"); err != nil {
 		return fmt.Errorf("failed to checkout master: branch %v", err)
@@ -260,55 +113,7 @@ func (a *AppInterface) UpdateAppInterface(_, saasFile, currentGitHash, promotion
 	if err := a.GitExecutor.Run(a.GitDirectory, "git", "checkout", "-b", branchName, "master"); err != nil {
 		return fmt.Errorf("failed to create branch %s: %v, does it already exist? If so, please delete it with `git branch -D %s` first", branchName, err, branchName)
 	}
-	// Update the hash in the SAAS file
-	fileContent, err := os.ReadFile(saasFile)
-	if err != nil {
-		return fmt.Errorf("failed to read file %s: %v", saasFile, err)
-	}
-	var newContent string
 
-	// If canary targets are set up in saas, replace the hash only in canary targets in the file content
-	// Otherwise proceed to promoting to all prod hives.
-	newContent, err, canaryTargetsSetUp := replaceTargetSha(string(fileContent), canaryStr, promotionGitHash)
-	if err != nil {
-		return fmt.Errorf("error modifying YAML: %v", err)
-	}
-	if !canaryTargetsSetUp {
-		fmt.Println("canary targets not set, continuing to replace all occurrences of sha.")
-		newContent = strings.ReplaceAll(string(fileContent), currentGitHash, promotionGitHash)
-	}
-
-	err = os.WriteFile(saasFile, []byte(newContent), 0600)
-	if err != nil {
-		return fmt.Errorf("failed to write to file %s: %v", saasFile, err)
-	}
-
-	return nil
-}
-
-func (a *AppInterface) UpdatePackageTag(saasFile, oldTag, promotionTag, branchName string) error {
-
-	if err := a.GitExecutor.Run(a.GitDirectory, "git", "checkout", "master"); err != nil {
-		return fmt.Errorf("failed to checkout master branch: %v", err)
-	}
-
-	if err := a.GitExecutor.Run(a.GitDirectory, "git", "branch", "-D", branchName); err != nil {
-		fmt.Printf("failed to cleanup branch %s: %v, continuing to create it.\n", branchName, err)
-	}
-
-	// Update the hash in the SAAS file
-	fileContent, err := os.ReadFile(saasFile)
-	if err != nil {
-		return fmt.Errorf("failed to read file %s: %v", saasFile, err)
-	}
-
-	// Replace the hash in the file content
-	newContent := strings.ReplaceAll(string(fileContent), oldTag, promotionTag)
-
-	err = os.WriteFile(saasFile, []byte(newContent), 0600)
-	if err != nil {
-		return fmt.Errorf("failed to write to file %s: %v", saasFile, err)
-	}
 	return nil
 }
 
@@ -319,6 +124,209 @@ func (a *AppInterface) CommitSaasFile(saasFile, commitMessage string) error {
 	}
 	if err := a.GitExecutor.Run(a.GitDirectory, "git", "commit", "-m", commitMessage); err != nil {
 		return fmt.Errorf("failed to commit changes: %v", err)
+	}
+
+	return nil
+}
+
+func (n *node) getValue(key string) *node {
+	if n.Kind == yaml.MappingNode {
+		for k := 0; k < len(n.Content)-1; k += 2 {
+			keyNode := n.Content[k]
+			valueNode := n.Content[k+1]
+
+			if keyNode.Value == key {
+				return (*node)(valueNode)
+			}
+		}
+	}
+
+	return nil
+}
+
+func (n *node) getStringValue(key string) string {
+	nodeValue := n.getValue(key)
+	if nodeValue != nil {
+		if nodeValue.Kind == yaml.ScalarNode {
+			return nodeValue.Value
+		}
+	}
+
+	return ""
+}
+
+func (n *node) getSequenceValue(key string) []*node {
+	nodeValue := n.getValue(key)
+	if nodeValue != nil {
+		if nodeValue.Kind == yaml.SequenceNode {
+			sequenceNodes := []*node{}
+
+			for _, rawSequenceNode := range nodeValue.Content {
+				sequenceNodes = append(sequenceNodes, (*node)(rawSequenceNode))
+			}
+
+			return sequenceNodes
+		}
+	}
+
+	return []*node{}
+}
+
+func CreateServiceObjFromSaasFile(saasFilePath string) (*ServiceObj, error) {
+	serviceData, err := os.ReadFile(saasFilePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read SAAS file: %v", err)
+	}
+
+	var documentNode yaml.Node
+
+	if err := yaml.Unmarshal(serviceData, &documentNode); err != nil {
+		return nil, fmt.Errorf("does not store YAML content: %v", err)
+	}
+
+	if len(documentNode.Content) != 1 || documentNode.Content[0].Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("no root YAML node in this SAAS file: %v", saasFilePath)
+	}
+	rootNode := (*node)(documentNode.Content[0])
+
+	serviceName := rootNode.getStringValue("name")
+	if serviceName == "" {
+		fmt.Printf("path 'name' is not defined as a non-empty string in this SAAS file: %s\n", saasFilePath)
+	}
+
+	serviceTargetNodes := []*node{}
+	for _, resourceTemplateNode := range rootNode.getSequenceValue("resourceTemplates") {
+		serviceTargetNodes = append(serviceTargetNodes, resourceTemplateNode.getSequenceValue("targets")...)
+	}
+	if len(serviceTargetNodes) == 0 {
+		fmt.Printf("path 'resourceTemplates[].targets' is not defined: %s\n", saasFilePath)
+	}
+
+	return &ServiceObj{saasFilePath, &documentNode, rootNode, serviceName, serviceTargetNodes}, nil
+}
+
+func (s *ServiceObj) GetRepoURL() (string, error) {
+	repoURL := ""
+
+	for _, resourceTemplateNode := range s.rootNode.getSequenceValue("resourceTemplates") {
+		resourceTemplateRepoURL := resourceTemplateNode.getStringValue("url")
+
+		if len(repoURL) == 0 {
+			repoURL = resourceTemplateRepoURL
+		} else if resourceTemplateRepoURL != repoURL {
+			return "", fmt.Errorf("path 'resourceTemplates[].url' does have its value set to '%s' "+
+				"for all the resource templates in this SAAS file: %s", repoURL, s.saasFilePath)
+		}
+	}
+
+	return repoURL, nil
+}
+
+func (s *ServiceObj) getFilteredTargets(namespaceRef string) []*node {
+	filteredTargetsNodes := []*node{}
+
+	if len(s.allTargetNodes) > 0 {
+		if namespaceRef == "" {
+			serviceNameToDefaultNamespaceRef := map[string]string{
+				"saas-configuration-anomaly-detection-db": "app-sre-observability-production-int.yml",
+				"saas-configuration-anomaly-detection":    "configuration-anomaly-detection-production",
+				"saas-osd-rhobs-rules-and-dashboards":     "production",
+				"saas-backplane-api":                      "backplanep",
+			}
+
+			namespaceRef = serviceNameToDefaultNamespaceRef[s.name]
+
+			if namespaceRef == "" { // look for canary targets
+				for _, targetNode := range s.allTargetNodes {
+					if strings.HasSuffix(targetNode.getStringValue("name"), canaryStr) {
+						filteredTargetsNodes = append(filteredTargetsNodes, targetNode)
+					}
+				}
+
+				if len(filteredTargetsNodes) > 0 {
+					return filteredTargetsNodes
+				}
+
+				fmt.Println("no canary target detected")
+
+				namespaceRef = prodHiveStr
+			}
+		}
+
+		for _, targetNode := range s.allTargetNodes {
+			targetNamespaceNode := targetNode.getValue("namespace")
+
+			if targetNamespaceNode != nil && strings.Contains(targetNamespaceNode.getStringValue("$ref"), namespaceRef) {
+				filteredTargetsNodes = append(filteredTargetsNodes, targetNode)
+			}
+		}
+
+		if len(filteredTargetsNodes) == 0 {
+			fmt.Printf("targets in '%s' SAAS file were all filtered out; "+
+				"strings in 'resourceTemplates[].targets[].namespace.$ref' path didn't match this regexp: .*%s.*\n",
+				s.saasFilePath, namespaceRef)
+		}
+	}
+
+	return filteredTargetsNodes
+}
+
+func (s *ServiceObj) GetCurrentGitHash(namespaceRef string) (string, error) {
+	filteredTargetsNodes := s.getFilteredTargets(namespaceRef)
+	if len(filteredTargetsNodes) == 0 {
+		return "", errors.New("cannot retrieve the current git hash as all targets got filtered out")
+	}
+
+	currentGitHash := ""
+
+	for _, targetNode := range filteredTargetsNodes {
+		targetGitHash := targetNode.getStringValue("ref")
+
+		if targetGitHash == "" {
+			return "", fmt.Errorf("path 'resourceTemplates[].targets[].ref' is not defined as a non-empty string "+
+				"for all the retained targets in this SAAS file: %s", s.saasFilePath)
+		}
+
+		if len(currentGitHash) == 0 {
+			currentGitHash = targetGitHash
+		} else if targetGitHash != currentGitHash {
+			return "", fmt.Errorf("path 'resourceTemplates[].targets[].ref' does have its value set to '%s' "+
+				"for all the retained targets in this SAAS file: %s", currentGitHash, s.saasFilePath)
+		}
+	}
+
+	return currentGitHash, nil
+}
+
+func (s *ServiceObj) SetGitHash(namespaceRef, gitHash string) error {
+	filteredTargetsNodes := s.getFilteredTargets(namespaceRef)
+	if len(filteredTargetsNodes) == 0 {
+		return errors.New("there is no target on which to change the git hash")
+	}
+
+	for _, targetNode := range filteredTargetsNodes {
+		targetRefNode := targetNode.getValue("ref")
+
+		if targetRefNode == nil {
+			return fmt.Errorf("path 'resourceTemplates[].targets[].ref' is not defined "+
+				"for all the retained targets in this SAAS file: %s", s.saasFilePath)
+		}
+
+		(*yaml.Node)(targetRefNode).SetString(gitHash)
+	}
+
+	return nil
+}
+
+func (s *ServiceObj) Save() error {
+	serviceData, err := yaml.Marshal(s.documentNode)
+
+	if err != nil {
+		return err
+	}
+
+	if err := os.WriteFile(s.saasFilePath, serviceData, 0600); err != nil {
+		return fmt.Errorf("failed to write SAAS file: %v", err)
 	}
 
 	return nil

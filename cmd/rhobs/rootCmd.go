@@ -33,6 +33,7 @@ func NewCmdRhobs() *cobra.Command {
 	cmd.AddCommand(newCmdCell())
 	cmd.AddCommand(newCmdLogs())
 	cmd.AddCommand(newCmdMetrics())
+	cmd.AddCommand(newCmdAlerts())
 
 	cmd.PersistentFlags().StringVarP(&commonOptions.clusterId, "cluster-id", "C", "", "Name or Internal ID of the cluster (defaults to current cluster context)")
 	cmd.PersistentFlags().StringVar(&commonOptions.hiveOcmUrl, "hive-ocm-url", "production", `OCM environment URL for hive operations - aliases: "production", "staging", "integration"`)

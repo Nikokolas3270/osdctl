@@ -324,15 +324,15 @@ type instantMetricResult struct {
 	Value  []interface{}     `json:"value"`
 }
 
-type tableColumn struct {
+type metricsTableColumn struct {
 	name  string
 	width int
 }
 
-func getTableColumns(results *[]instantMetricResult) []tableColumn {
-	timeColumn := tableColumn{name: "TIME", width: len("TIME")}
-	valueColumn := tableColumn{name: "VALUE", width: len("VALUE")}
-	labelNameToColumn := make(map[string]*tableColumn)
+func getMetricsTableColumns(results *[]instantMetricResult) []metricsTableColumn {
+	timeColumn := metricsTableColumn{name: "TIME", width: len("TIME")}
+	valueColumn := metricsTableColumn{name: "VALUE", width: len("VALUE")}
+	labelNameToColumn := make(map[string]*metricsTableColumn)
 	labelNames := []string{} // to maintain order of label columns
 
 	for _, result := range *results {
@@ -350,7 +350,7 @@ func getTableColumns(results *[]instantMetricResult) []tableColumn {
 
 		for labelName, labelValue := range result.Metric {
 			if _, exists := labelNameToColumn[labelName]; !exists {
-				labelNameToColumn[labelName] = &tableColumn{name: labelName, width: len(labelName)}
+				labelNameToColumn[labelName] = &metricsTableColumn{name: labelName, width: len(labelName)}
 				labelNames = append(labelNames, labelName)
 			}
 			if len(labelValue) > labelNameToColumn[labelName].width {
@@ -359,7 +359,7 @@ func getTableColumns(results *[]instantMetricResult) []tableColumn {
 		}
 	}
 
-	columns := []tableColumn{timeColumn, valueColumn}
+	columns := []metricsTableColumn{timeColumn, valueColumn}
 
 	sort.Strings(labelNames)
 	for _, labelName := range labelNames {
@@ -372,7 +372,7 @@ func getTableColumns(results *[]instantMetricResult) []tableColumn {
 type metricsPrinter func(*[]instantMetricResult)
 
 func printMetricsAsTable(results *[]instantMetricResult) {
-	columns := getTableColumns(results)
+	columns := getMetricsTableColumns(results)
 	separatorLine := "+"
 	for _, column := range columns {
 		separatorLine += strings.Repeat("-", column.width+2) + "+"
@@ -407,7 +407,7 @@ func printMetricsAsTable(results *[]instantMetricResult) {
 }
 
 func printMetricsAsCsv(results *[]instantMetricResult) {
-	columns := getTableColumns(results)
+	columns := getMetricsTableColumns(results)
 
 	writer := csv.NewWriter(os.Stdout)
 
@@ -970,6 +970,53 @@ func (q *RhobsFetcher) StreamLogs(lokiExpr string, startTime time.Time, format L
 	}
 
 	logsPrinter.PrintTrailer()
+
+	return nil
+}
+
+func (q *RhobsFetcher) PrintAlerts() error {
+	client, err := q.getClient()
+	if err != nil {
+		return err
+	}
+
+	isPrintingActiveAlerts := true
+
+	params := &rhobsclient.GetAlertsParams{
+		Active:      &isPrintingActiveAlerts,
+		Silenced:    &isPrintingActiveAlerts,
+		Inhibited:   &isPrintingActiveAlerts,
+		Unprocessed: &isPrintingActiveAlerts,
+	}
+	// if cmd.Flags().Changed("active") {
+	// 	params.Active = isPrintingActiveAlerts
+	// }
+	// if cmd.Flags().Changed("silenced") {
+	// 	params.Silenced = &silencedFilter
+	// }
+	// if cmd.Flags().Changed("inhibited") {
+	// 	params.Inhibited = &inhibitedFilter
+	// }
+	// if cmd.Flags().Changed("unprocessed") {
+	// 	params.Unprocessed = &unprocessedFilter
+	// }
+	// if receiverFilter != "" {
+	// 	params.Receiver = &receiverFilter
+	// }
+	// if len(labelFilters) > 0 {
+	// 	params.Filter = &labelFilters
+	// }
+
+	response, err := client.GetAlertsWithResponse(context.TODO(), "hcp", params)
+
+	if err != nil {
+		return fmt.Errorf("failed to send request to RHOBS: %v", err)
+	}
+	if response.HTTPResponse.StatusCode != http.StatusOK {
+		return fmt.Errorf("RHOBS query failed with status code: %d - body: %s", response.HTTPResponse.StatusCode, string(response.Body))
+	}
+
+	fmt.Println(string(response.Body))
 
 	return nil
 }
